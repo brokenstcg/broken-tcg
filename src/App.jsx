@@ -1,13 +1,10 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
+import { auth, db } from './firebase'; 
 import { 
-  getAuth, 
   signInAnonymously, 
-  onAuthStateChanged,
-  signInWithCustomToken
+  onAuthStateChanged
 } from 'firebase/auth';
 import { 
-  getFirestore, 
   collection, 
   addDoc, 
   query, 
@@ -30,23 +27,19 @@ import {
   Lock, Key
 } from 'lucide-react';
 
-// --- FIREBASE INIT (Self-Contained for Preview) ---
-// We initialize this inside the file to ensure it works in the preview environment
-// without needing external file resolution.
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
-
 // --- CONFIGURATION ---
-// DIRECTLY USING YOUR KEY FOR IMMEDIATE FUNCTIONALITY
-const GEMINI_API_KEY = "AIzaSyCBC3zeSrVrc71xlejxez6mnymAjcANaQU"; 
+const appId = 'broken-tcg-prod'; 
+// Use environment variable if available, otherwise empty string (for preview)
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || ""; 
 
 const callGemini = async (prompt, systemInstruction = "", imageBase64 = null) => {
+  if (!GEMINI_API_KEY) {
+      console.error("Gemini API Key missing");
+      // Fail gracefully if key is missing so the app doesn't crash on load
+      return ""; 
+  }
   try {
     const parts = [{ text: prompt }];
-    
     if (imageBase64) {
       parts.push({
         inlineData: {
@@ -55,12 +48,8 @@ const callGemini = async (prompt, systemInstruction = "", imageBase64 = null) =>
         }
       });
     }
-    
-    // Using standard stable model
-    const model = "gemini-1.5-flash";
-
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -70,13 +59,7 @@ const callGemini = async (prompt, systemInstruction = "", imageBase64 = null) =>
         }),
       }
     );
-
-    if (!response.ok) {
-        const errData = await response.json();
-        console.error("Gemini API Error Details:", errData);
-        throw new Error(`Gemini API Error: ${response.status} ${response.statusText}`);
-    }
-    
+    if (!response.ok) throw new Error(`Gemini API Error: ${response.statusText}`);
     const data = await response.json();
     return data.candidates?.[0]?.content?.parts?.[0]?.text || "";
   } catch (error) {
@@ -129,7 +112,6 @@ function AdminLoginModal({ onClose, onSuccess, notify }) {
     e.preventDefault();
     setError('');
     setIsLoading(true);
-    // Simulating async check - in real production you'd check auth against Firebase Auth user roles
     setTimeout(() => {
       if (email === 'deadlybroken25@gmail.com' && password === 'Deadbroke123!@#') {
         notify("Admin Access Granted");
@@ -281,7 +263,7 @@ function SellView({ user, onSuccess, settings, notify }) {
                 quantity: item.quantity || 1 
             }));
             setCards(prev => [...prev, ...newCards]);
-            notify(`✨ AI extracted ${newCards.length} cards!`, 'success');
+            notify(`✨ AI extracted ${newCards.length} cards!`);
             setShowAIModal(false);
             setAiInput('');
           } else { throw new Error("AI did not return an array"); }
@@ -313,7 +295,7 @@ function SellView({ user, onSuccess, settings, notify }) {
                jsonStr = jsonStr.substring(firstBrace, lastBrace + 1);
                const data = JSON.parse(jsonStr);
                setCards(prev => prev.map(c => c.id === rowId ? { ...c, name: data.name || c.name, set: data.set || c.set, number: data.number || c.number, condition: data.condition || 'NM', quantity: c.quantity || 1 } : c));
-               notify("✨ Card Scanned Successfully!", 'success');
+               notify("✨ Card Scanned Successfully!");
            } else { throw new Error("No JSON"); }
         } catch (err) { 
             console.error(err);
@@ -1072,4 +1054,376 @@ function AdminDashboard({ user, settings, setSettings, notify, onExport }) {
       </div>
     </div>
   );
+}
+
+/* --- SUBMISSION DETAIL (Includes Fixed App) --- */
+function SubmissionDetail({ submission, onBack, strictMatches, onExport, debugMode, setDebugMode, normalizeForMatch, normalizeNumber, buyList, notify }) {
+   const totalCards = submission.cards.length;
+   
+   // Status State
+   const [status, setStatus] = useState(submission.status || 'pending');
+
+   // AI State
+   const [emailDraft, setEmailDraft] = useState('');
+   const [isGenerating, setIsGenerating] = useState(false);
+   const [collectionInsight, setCollectionInsight] = useState('');
+   const [isAnalyzing, setIsAnalyzing] = useState(false);
+   
+   // Selection State
+   const [selectedIndices, setSelectedIndices] = useState(new Set());
+
+   // AI Matching State
+   const [isRunningSmartMatch, setIsRunningSmartMatch] = useState(false);
+   const [potentialMatches, setPotentialMatches] = useState({}); // { cardIndex: { ...buyListItem } }
+
+   // Status Handler
+   const handleStatusChange = async (newStatus) => {
+      setStatus(newStatus); // Optimistic update
+      try {
+         // Use updateDoc to patch just the status field
+         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'submissions', submission.id), {
+            status: newStatus
+         });
+         notify(`Status updated to ${newStatus}`);
+      } catch (error) {
+         console.error("Failed to update status", error);
+         notify("Failed to update status", "error");
+         setStatus(submission.status); // Revert on failure
+      }
+   };
+
+   // Derived Totals
+   const totalSelectedValue = useMemo(() => {
+      let total = 0;
+      selectedIndices.forEach(i => {
+         const card = submission.cards[i];
+         const match = strictMatches[i] || potentialMatches[i];
+         if (match) {
+            const price = parseFloat(match.price) || 0;
+            const qty = parseInt(card.quantity) || 1;
+            total += price * qty;
+         }
+      });
+      return total.toFixed(2);
+   }, [selectedIndices, strictMatches, potentialMatches, submission.cards]);
+
+   const toggleSelection = (index) => {
+      const newSet = new Set(selectedIndices);
+      if (newSet.has(index)) newSet.delete(index);
+      else newSet.add(index);
+      setSelectedIndices(newSet);
+   };
+
+   const selectAllMatches = () => {
+      const newSet = new Set();
+      submission.cards.forEach((_, i) => {
+         if (strictMatches[i] || potentialMatches[i]) newSet.add(i);
+      });
+      setSelectedIndices(newSet);
+   };
+   
+   const handleExport = () => {
+      if (selectedIndices.size === 0) {
+         alert("Please select matches to export.");
+         return;
+      }
+      const cardsToExport = submission.cards.filter((_, i) => selectedIndices.has(i));
+      onExport(cardsToExport, submission.customer.firstName);
+   };
+
+   const handleGenerateEmail = async () => {
+      if (selectedIndices.size === 0) {
+         alert("Please select cards to generate an offer for.");
+         return;
+      }
+      
+      setIsGenerating(true);
+      
+      const selectedData = Array.from(selectedIndices).map(i => {
+         const card = submission.cards[i];
+         const match = strictMatches[i] || potentialMatches[i];
+         const price = parseFloat(match?.price || 0).toFixed(2);
+         const qty = card.quantity || 1;
+         return `- ${qty}x ${card.name} (${card.set}): $${price}/ea`;
+      }).join('\n');
+
+      const prompt = `
+        Write a friendly but professional email from "Broken TCG" to a customer named ${submission.customer.firstName}.
+        Context: We reviewed their list and want to buy specific cards.
+        
+        Here is the list of cards we are offering to buy, including our buy prices:
+        ${selectedData}
+        
+        Total Offer Amount: $${totalSelectedValue}
+        
+        Instructions:
+        - Thank them for the submission.
+        - Present the list clearly.
+        - Mention the total offer price prominently.
+        - Ask them to reply to confirm so we can send shipping instructions.
+        - Keep it concise.
+        - Do not include a subject line.
+      `;
+
+      try {
+        const text = await callGemini(prompt);
+        setEmailDraft(text);
+      } catch (e) {
+        alert("AI Error");
+      } finally {
+        setIsGenerating(false);
+      }
+   };
+
+   const handleAnalyzeCollection = async () => {
+     setIsAnalyzing(true);
+     const cardsList = submission.cards.map(c => `${c.quantity}x ${c.name} (${c.set})`).join(', ');
+     const prompt = `
+       Analyze this list of Pokemon cards and provide a 2-sentence summary of the collection's "vibe" for a store owner.
+       Mention if it's mostly vintage, modern, high-value, or bulk.
+       List: ${cardsList.substring(0, 2000)}...
+     `;
+     
+     try {
+       const text = await callGemini(prompt);
+       setCollectionInsight(text);
+     } catch(e) {
+       alert("Analysis Failed");
+     } finally {
+       setIsAnalyzing(false);
+     }
+   };
+
+   // --- AI SMART MATCHING LOGIC ---
+   const handleSmartMatch = async () => {
+      setIsRunningSmartMatch(true);
+      const newPotentials = {};
+
+      try {
+         const unmatchedIndices = submission.cards.map((c, i) => {
+             const n = normalizeForMatch(c.name);
+             const s = normalizeForMatch(c.set);
+             // Strict match lookup logic duplicated here for filter
+             const isStrictMatch = !!strictMatches[i];
+             return isStrictMatch ? null : { card: c, index: i };
+         }).filter(x => x !== null);
+
+         for (const item of unmatchedIndices) {
+             const { card, index } = item;
+             
+             const candidates = buyList.filter(b => {
+                 const bName = normalizeForMatch(b.name);
+                 const cName = normalizeForMatch(card.name);
+                 const bSet = normalizeForMatch(b.set);
+                 const cSet = normalizeForMatch(card.set);
+                 return (bName === cName) || (bSet === cSet) || (bName.includes(cName)) || (cName.includes(bName));
+             }).slice(0, 15); 
+
+             if (candidates.length === 0) continue;
+
+             const candidatesStr = candidates.map((c, idx) => `${idx}: ${c.name} | ${c.set} | $${c.price}`).join('\n');
+             const prompt = `
+               I am matching Pokemon cards.
+               Customer Card: "${card.name}" from set "${card.set}".
+               
+               Candidates:
+               ${candidatesStr}
+               
+               Task: Identify if any candidate is the SAME card.
+               - Focus primarily on NAME and SET. 
+               - IGNORE the Card Number unless it helps confirm a match.
+               - Allow for differences like "Base Set 2" vs "Base Set II".
+               
+               If you find a match with >50% confidence, return ONLY the index number.
+               If no match is found, return "-1".
+             `;
+
+             const resultText = await callGemini(prompt, "Return only the index number or -1.");
+             const matchedIndex = parseInt(resultText.trim());
+
+             if (!isNaN(matchedIndex) && matchedIndex !== -1 && candidates[matchedIndex]) {
+                 newPotentials[index] = candidates[matchedIndex];
+             }
+         }
+         
+         setPotentialMatches(newPotentials);
+         if(Object.keys(newPotentials).length > 0) {
+             alert(`AI found ${Object.keys(newPotentials).length} possible matches!`);
+         } else {
+             alert("AI finished scan but found no confident matches for remaining cards.");
+         }
+
+      } catch (err) {
+          console.error("AI Match Error", err);
+          alert("AI Matching failed. Check console.");
+      } finally {
+          setIsRunningSmartMatch(false);
+      }
+   };
+
+   return (
+     <div className="animate-fade-in">
+        <div className="flex justify-between items-center mb-4">
+           <button onClick={onBack} className="text-gray-500 hover:text-gray-800 flex items-center text-sm">
+              <X size={16} className="mr-1"/> Back to List
+           </button>
+           <div className="flex items-center space-x-2">
+              <span className="text-sm text-gray-500 font-medium">Set Status:</span>
+              <select 
+                value={status} 
+                onChange={(e) => handleStatusChange(e.target.value)}
+                className="bg-white border border-gray-300 text-gray-700 text-sm rounded-md focus:ring-blue-500 focus:border-blue-500 block p-2"
+              >
+                 <option value="pending">Pending Review</option>
+                 <option value="contacted">Contacted</option>
+                 <option value="finalized">Finalized</option>
+              </select>
+           </div>
+        </div>
+
+        <div className="bg-slate-50 p-6 rounded-lg border border-slate-200 mb-6">
+           <div className="flex justify-between items-start">
+              <div>
+                 <h1 className="text-2xl font-bold text-slate-800">{submission.customer.firstName}</h1>
+                 <div className="mt-2 space-y-1 text-sm text-gray-600">
+                    <p className="flex items-center"><Mail size={14} className="mr-2"/> {submission.customer.email}</p>
+                    <p className="flex items-center"><Phone size={14} className="mr-2"/> {submission.customer.phone || 'No phone'}</p>
+                 </div>
+              </div>
+              <div className="text-right">
+                 <div className="text-3xl font-bold text-green-600">${totalSelectedValue}</div>
+                 <div className="text-xs text-gray-500 uppercase font-bold">Total Offer Value</div>
+                 <div className="text-xs text-gray-400 mt-1">{selectedIndices.size} Cards Selected</div>
+              </div>
+           </div>
+        </div>
+
+        {/* AI Action Bar */}
+        <div className="bg-white p-4 border border-purple-100 rounded-lg shadow-sm mb-6 flex flex-wrap gap-4 items-center">
+           <span className="text-xs font-bold text-purple-500 uppercase flex items-center"><Sparkles size={14} className="mr-1"/> Actions:</span>
+           
+           <button 
+             onClick={handleSmartMatch} 
+             disabled={isRunningSmartMatch}
+             className="text-sm bg-gradient-to-r from-purple-600 to-blue-600 text-white px-4 py-1.5 rounded-md hover:opacity-90 font-bold transition flex items-center shadow-sm disabled:opacity-50"
+           >
+              {isRunningSmartMatch ? <Loader2 className="animate-spin mr-2" size={14}/> : <BrainCircuit size={14} className="mr-2"/>}
+              {isRunningSmartMatch ? 'Scanning...' : 'Run AI Smart Match'}
+           </button>
+
+           <button onClick={handleGenerateEmail} className="text-sm bg-purple-50 text-purple-700 px-3 py-1.5 rounded-md hover:bg-purple-100 font-medium transition border border-purple-200 flex items-center">
+              {isGenerating ? <Loader2 className="animate-spin mr-2" size={14}/> : <Mail size={14} className="mr-2"/>}
+              Draft Offer Email
+           </button>
+
+           <div className="ml-auto flex items-center gap-4">
+             <button onClick={handleExport} className="bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded text-sm font-medium hover:bg-gray-50 flex items-center">
+                 <Download size={14} className="mr-2"/> Export TCG
+              </button>
+             <button onClick={selectAllMatches} className="text-sm text-gray-600 hover:text-gray-900 font-medium">Select All Matches</button>
+             <div className="border-l pl-4">
+               <label className="flex items-center text-xs font-bold text-gray-500 cursor-pointer">
+                 <input type="checkbox" className="mr-2" checked={debugMode} onChange={(e) => setDebugMode(e.target.checked)} />
+                 <Bug size={14} className="mr-1"/> Debug
+               </label>
+             </div>
+           </div>
+        </div>
+
+        {/* AI Results Area */}
+        {(emailDraft || collectionInsight) && (
+          <div className="grid md:grid-cols-2 gap-4 mb-6">
+            {emailDraft && (
+              <div className="bg-purple-50 border border-purple-100 p-4 rounded-lg relative">
+                <h4 className="text-xs font-bold text-purple-500 uppercase mb-2">Draft Email</h4>
+                <textarea 
+                  className="w-full bg-transparent text-sm text-gray-700 focus:outline-none resize-y min-h-[100px]" 
+                  value={emailDraft} 
+                  onChange={(e) => setEmailDraft(e.target.value)} 
+                />
+                <button onClick={() => setEmailDraft('')} className="absolute top-2 right-2 text-purple-300 hover:text-purple-600"><X size={14}/></button>
+              </div>
+            )}
+            {collectionInsight && (
+               <div className="bg-indigo-50 border border-indigo-100 p-4 rounded-lg relative">
+                  <h4 className="text-xs font-bold text-indigo-500 uppercase mb-2">Collection Insight</h4>
+                  <p className="text-sm text-gray-700 italic leading-relaxed">"{collectionInsight}"</p>
+                  <button onClick={() => setCollectionInsight('')} className="absolute top-2 right-2 text-indigo-300 hover:text-indigo-600"><X size={14}/></button>
+               </div>
+            )}
+          </div>
+        )}
+
+        <div className="border rounded-lg overflow-hidden">
+           <table className="min-w-full text-sm">
+              <thead className="bg-gray-100 text-gray-600">
+                 <tr>
+                    <th className="px-4 py-2 text-left w-10"></th>
+                    <th className="px-4 py-2 text-left">Status</th>
+                    <th className="px-4 py-2 text-left">Qty</th>
+                    <th className="px-4 py-2 text-left">Card Name</th>
+                    <th className="px-4 py-2 text-left">Set</th>
+                    <th className="px-4 py-2 text-left">Number</th>
+                    <th className="px-4 py-2 text-left">Condition</th>
+                    <th className="px-4 py-2 text-left text-green-700 font-bold">Buy Price</th>
+                 </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                 {submission.cards.map((card, i) => {
+                    const n = normalizeForMatch(card.name);
+                    const s = normalizeForMatch(card.set);
+                    const key = `${n}|${s}`;
+
+                    // Matches
+                    const strictMatch = strictMatches[i];
+                    const aiMatch = potentialMatches[i];
+                    const match = strictMatch || aiMatch;
+                    const hasMatch = !!match;
+                    
+                    const isSelected = selectedIndices.has(i);
+
+                    return (
+                       <React.Fragment key={i}>
+                          <tr className={strictMatch ? 'bg-green-50/50' : aiMatch ? 'bg-yellow-50' : 'bg-white opacity-60'}>
+                              <td className="px-4 py-2 text-center">
+                                 {hasMatch && (
+                                    <button onClick={() => toggleSelection(i)} className="text-blue-600">
+                                       {isSelected ? <CheckSquare size={20}/> : <Square size={20}/>}
+                                    </button>
+                                 )}
+                              </td>
+                              <td className="px-4 py-2">
+                                 {strictMatch && <span className="text-green-600 font-bold flex items-center"><CheckCircle size={14} className="mr-1"/> MATCH</span>}
+                                 {aiMatch && !strictMatch && (
+                                    <div className="text-yellow-600 font-bold flex flex-col text-xs">
+                                       <span className="flex items-center"><Sparkles size={14} className="mr-1"/> AI POSSIBLE:</span>
+                                       <span className="font-normal text-gray-500">{aiMatch.name}</span>
+                                    </div>
+                                 )}
+                                 {!hasMatch && <span className="text-gray-400">No Match</span>}
+                              </td>
+                              <td className="px-4 py-2 font-bold">{card.quantity || 1}</td>
+                              <td className="px-4 py-2 font-medium">{card.name}</td>
+                              <td className="px-4 py-2">{card.set}</td>
+                              <td className="px-4 py-2">{card.number}</td>
+                              <td className="px-4 py-2">{card.condition}</td>
+                              <td className="px-4 py-2 font-mono text-green-700 font-bold">
+                                 {match ? `$${match.price}` : '-'}
+                              </td>
+                           </tr>
+                           {debugMode && (
+                              <tr className="bg-gray-50 text-xs font-mono text-gray-500">
+                                 <td colSpan="8" className="px-4 py-1">
+                                    DEBUG KEY: <span className="text-blue-600">{key}</span> {strictMatch ? '(STRICT)' : aiMatch ? '(AI)' : '(NONE)'}
+                                 </td>
+                              </tr>
+                           )}
+                       </React.Fragment>
+                    )
+                 })}
+              </tbody>
+           </table>
+        </div>
+     </div>
+   );
 }
