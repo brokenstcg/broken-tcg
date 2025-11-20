@@ -1,4 +1,4 @@
-src_app_jsx = r"""import React, { useState, useEffect, useMemo } from 'react';
+src_app_jsx = r;import React, { useState, useEffect, useMemo } from 'react';
 import { auth, db } from './firebase'; 
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { collection, addDoc, query, onSnapshot, orderBy, serverTimestamp, doc, setDoc, getDoc, deleteDoc, updateDoc, writeBatch, getDocs } from 'firebase/firestore';
