@@ -37,7 +37,7 @@ const callGemini = async (prompt, systemInstruction = "", imageBase64 = null) =>
     const parts = [{ text: prompt }];
     if (imageBase64) parts.push({ inlineData: { mimeType: "image/jpeg", data: imageBase64 } });
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${AIzaSyCBC3zeSrVrc71xlejxez6mnymAjcANaQU}`,
       { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contents: [{ parts: parts }], systemInstruction: { parts: [{ text: systemInstruction }] } }) }
     );
     if (!response.ok) throw new Error(`Gemini API Error: ${response.statusText}`);
