@@ -1,8 +1,32 @@
-src_app_jsx = r; import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { auth, db } from './firebase'; 
-import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { collection, addDoc, query, onSnapshot, orderBy, serverTimestamp, doc, setDoc, getDoc, deleteDoc, updateDoc, writeBatch, getDocs } from 'firebase/firestore';
-import { Upload, Download, Search, Plus, Trash2, CheckCircle, AlertCircle, Menu, X, Settings, Database, DollarSign, Mail, Phone, User, FileText, Image as ImageIcon, Sparkles, Loader2, Camera, Lightbulb, Bug, BrainCircuit, Check, CheckSquare, Square, Clock, Send, Archive, Lock, Key } from 'lucide-react';
+import { 
+  signInAnonymously, 
+  onAuthStateChanged,
+  signInWithCustomToken
+} from 'firebase/auth';
+import { 
+  collection, 
+  addDoc, 
+  query, 
+  onSnapshot, 
+  orderBy, 
+  serverTimestamp,
+  doc,
+  setDoc,
+  getDoc,
+  deleteDoc,
+  updateDoc,
+  writeBatch,
+  getDocs
+} from 'firebase/firestore';
+import { 
+  Upload, Download, Search, Plus, Trash2, CheckCircle, AlertCircle, 
+  Menu, X, Settings, Database, DollarSign, Mail, Phone, User, 
+  FileText, Image as ImageIcon, Sparkles, Loader2, Camera, Lightbulb, 
+  Bug, BrainCircuit, Check, CheckSquare, Square, Clock, Send, Archive, 
+  Lock, Key
+} from 'lucide-react';
 
 const appId = 'broken-tcg-prod'; 
 const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || ""; 
